@@ -5,6 +5,8 @@
 module PostgresWebsockets.HasqlBroadcast
   ( newHasqlBroadcaster
   , newHasqlBroadcasterOrError
+  , newHasqlBroadcasterForChannel
+  , tryUntilConnected
   -- re-export
   , acquire
   , relayMessages
@@ -23,13 +25,18 @@ import Control.Retry           (RetryStatus, retrying, capDelay, exponentialBack
 import PostgresWebsockets.Database
 import PostgresWebsockets.Broadcast
 
+type CloseProducer = (Either SomeException () -> IO ())
+
+defaultCloseProducer :: CloseProducer
+defaultCloseProducer _ = putErrLn "Broadcaster is dead"
+
 {- | Returns a multiplexer from a connection URI, keeps trying to connect in case there is any error.
    This function also spawns a thread that keeps relaying the messages from the database to the multiplexer's listeners
 -}
 newHasqlBroadcaster :: ByteString -> ByteString -> IO Multiplexer
 newHasqlBroadcaster ch = newHasqlBroadcasterForConnection . tryUntilConnected
   where
-    newHasqlBroadcasterForConnection = newHasqlBroadcasterForChannel ch
+    newHasqlBroadcasterForConnection = newHasqlBroadcasterForChannel ch defaultCloseProducer
 
 {- | Returns a multiplexer from a connection URI or an error message on the left case
    This function also spawns a thread that keeps relaying the messages from the database to the multiplexer's listeners
@@ -38,7 +45,7 @@ newHasqlBroadcasterOrError :: ByteString -> ByteString -> IO (Either ByteString 
 newHasqlBroadcasterOrError ch =
   acquire >=> (sequence . mapBoth show (newHasqlBroadcasterForConnection . return))
   where
-    newHasqlBroadcasterForConnection = newHasqlBroadcasterForChannel ch
+    newHasqlBroadcasterForConnection = newHasqlBroadcasterForChannel ch defaultCloseProducer
 
 tryUntilConnected :: ByteString -> IO Connection
 tryUntilConnected =
@@ -78,13 +85,13 @@ tryUntilConnected =
    @
 
 -}
-newHasqlBroadcasterForChannel :: ByteString -> IO Connection -> IO Multiplexer
-newHasqlBroadcasterForChannel ch getCon = do
+newHasqlBroadcasterForChannel :: ByteString -> CloseProducer -> IO Connection -> IO Multiplexer
+newHasqlBroadcasterForChannel ch closeProducer getCon = do
   multi <- newMultiplexer openProducer closeProducer
   void $ relayMessagesForever multi
   return multi
   where
-    closeProducer _ = putErrLn "Broadcaster is dead"
+    --closeProducer _ = putErrLn "Broadcaster is dead"
     toMsg :: ByteString -> ByteString -> Message
     toMsg c m = case decode (toS m) of
                    Just v -> Message (channelDef c v) m
